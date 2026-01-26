@@ -26,6 +26,7 @@ import { MAX_SUBJECTS_PER_USER, DELAYS } from './config.js';
 export async function handleDocumentUpload(client, message, media) {
     const chat = await message.getChat();
     const remitente = message.from;
+    let parsed = null; // Declare outside try for access in catch
     
     try {
         logger.info('Document upload received', { 
@@ -57,7 +58,7 @@ export async function handleDocumentUpload(client, message, media) {
         const ocrText = await performOCR(buffer, media.mimetype);
         
         // Step 3: Parse data
-        const parsed = parseEnrollmentDocument(ocrText);
+        parsed = parseEnrollmentDocument(ocrText);
         
         if (!parsed.isValid) {
             await enviarMensajeHumano(
@@ -119,11 +120,11 @@ export async function handleDocumentUpload(client, message, media) {
         // Step 7: Show confirmation message
         let confirmMsg = 
             `✅ *Documento procesado*\n\n` +
-            `👤 *Estudiante:* ${parsed.studentName}\n` +
-            `🆔 *Registro:* ${parsed.registrationNumber}\n` +
-            `📊 *Materias actuales:* ${currentCount}/${MAX_SUBJECTS_PER_USER}\n` +
-            `📚 *Nuevas materias:* ${newSubjectsCount}\n\n` +
-            `📋 *Materias detectadas:*\n`;
+            `*Estudiante:* ${parsed.studentName}\n` +
+            `*Registro:* ${parsed.registrationNumber}\n` +
+            `*Materias actuales:* ${currentCount}/${MAX_SUBJECTS_PER_USER}\n` +
+            `*Nuevas materias:* ${newSubjectsCount}\n\n` +
+            `*Materias detectadas:*\n`;
         
         for (const s of mappedSubjects) {
             const icon = s.canAdd ? '✅' : '⚠️';
@@ -159,6 +160,18 @@ export async function handleDocumentUpload(client, message, media) {
             error: error.message,
             from: remitente 
         });
+        
+        // Check if it's a duplicate registration number error
+        if (error.message && error.message.includes('students_registration_number_key')) {
+            const registrationNumber = parsed?.registrationNumber || 'desconocido';
+            await enviarMensajeHumano(
+                chat,
+                `⚠️ *Número de registro ya existe*\n\n` +
+                `El número de registro *${registrationNumber}* ya está asociado a otro número de WhatsApp.\n\n` +
+                `Si este es tu número de registro y cambiaste de número de WhatsApp, contacta al administrador para actualizar tus datos.`
+            );
+            return;
+        }
         
         await enviarMensajeHumano(
             chat,
@@ -288,7 +301,7 @@ export async function handleConfirmation(client, message, remitente, agregarAGru
         await updateDocumentStatus(pendingDoc.id, 'completed');
         
         // Send results
-        let resultMsg = `✅ *Inscripción completada!*\n\n`;
+        let resultMsg = `*Inscripción completada!*\n\n`;
         
         if (results.success.length > 0) {
             resultMsg += `*✓ Agregado exitosamente (${results.success.length}):*\n`;

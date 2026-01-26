@@ -105,47 +105,73 @@ export function extractStudentName(text) {
 export function extractSubjects(text) {
     const subjects = [];
     
-    // Normalize text: fix common OCR errors
+    // Log original text for debugging
+    logger.info('Extracting subjects from text', {
+        textLength: text.length,
+        textPreview: text.substring(0, 300)
+    });
+    
+    // Normalize text: fix common OCR errors (but preserve newlines for table parsing)
     const normalized = text
         .replace(/[Oo](?=\d)/g, '0')  // O -> 0 before digits
-        .replace(/[Il](?=\d)/g, '1')  // I/l -> 1 before digits
-        .replace(/\s+/g, ' ');          // Multiple spaces -> single
+        .replace(/[Il](?=\d)/g, '1'); // I/l -> 1 before digits
 
-    // Debug: Log normalized text preview
-    logger.debug('Searching for subjects', {
-        normalizedPreview: normalized.substring(0, 400).replace(/\n/g, ' ')
-    });
-
-    // Pattern: SIGLA (3-4 letters + 3-4 digits) + GRUPO (1-2 chars: digit+letter OR letter+letter) + MATERIA (caps text)
-    // Examples: INF412 5A, INF412 SA, ECO449 5A
-    const pattern = /\b([A-Z]{3,4}\d{3,4})\s+(\d?[A-Z]{1,2})\s+([A-ZÑÁÉÍÓÚÜ\s.]{5,})(?=\s+(?:PRESENCIAL|VIRTUAL|HIBRIDA|\d+|Ma|Lu|Mi|Ju|Vi|Sa|Do)|\s*$)/gi;
+    // Pattern 1: Table with pipes (Markdown-style table from OCR.space)
+    // Example: | INF412 | SA | SISTEMAS DE INFORMACION II | PRESENCIAL | 7 | Ma 07:00-09:15 |
+    const tablePattern = /\|\s*([A-Z]{3,4}\d{3,4})\s*\|\s*(\d?[A-Z]{1,2})\s*\|\s*([A-ZÑÁÉÍÓÚÜ\s.0-9]{5,}?)\s*\|/gi;
     
     let match;
-    while ((match = pattern.exec(normalized)) !== null) {
+    while ((match = tablePattern.exec(normalized)) !== null) {
         const [fullMatch, sigla, grupo, materia] = match;
         
-        // Clean up materia (remove trailing spaces and common OCR artifacts)
+        // Clean up materia (remove trailing spaces)
         const materiaClean = materia.trim().replace(/\s+/g, ' ');
         
-        // Extract additional fields if present in context
-        const context = normalized.substring(match.index, match.index + 200);
-        const modalidad = context.match(/\b(PRESENCIAL|VIRTUAL|HIBRIDA)\b/i)?.[1] || null;
-        const nivel = context.match(/\b(\d+)\b/)?.[1] || null;
-        
-        // Try to extract schedule (HH:MM format)
-        const horarioMatch = context.match(/(\d{1,2}:\d{2}\s*-\s*\d{1,2}:\d{2})/);
-        const horario = horarioMatch ? horarioMatch[1] : null;
-
         subjects.push({
             sigla: sigla.trim().toUpperCase(),
             grupo: grupo.trim().toUpperCase(),
             materia: materiaClean,
-            modalidad,
-            nivel,
-            horario
+            modalidad: null,
+            nivel: null,
+            horario: null
         });
         
-        logger.debug('Subject extracted', { sigla, grupo, materia: materiaClean });
+        logger.info('Subject extracted (table)', { sigla, grupo, materia: materiaClean });
+    }
+    
+    // Pattern 2: Plain text format (fallback for Tesseract)
+    // Examples: INF412 5A SISTEMAS OPERATIVOS, INF412 SA SISTEMAS OPERATIVOS
+    if (subjects.length === 0) {
+        // Only normalize spaces for plain text parsing
+        const textForPlain = normalized.replace(/\s+/g, ' ');
+        const pattern = /\b([A-Z]{3,4}\d{3,4})\s+(\d?[A-Z]{1,2})\s+([A-ZÑÁÉÍÓÚÜ\s.]{5,})(?=\s+(?:PRESENCIAL|VIRTUAL|HIBRIDA|\d+|Ma|Lu|Mi|Ju|Vi|Sa|Do)|\s*$)/gi;
+        
+        while ((match = pattern.exec(textForPlain)) !== null) {
+            const [fullMatch, sigla, grupo, materia] = match;
+            
+            // Clean up materia (remove trailing spaces and common OCR artifacts)
+            const materiaClean = materia.trim().replace(/\s+/g, ' ');
+            
+            // Extract additional fields if present in context
+            const context = normalized.substring(match.index, match.index + 200);
+            const modalidad = context.match(/\b(PRESENCIAL|VIRTUAL|HIBRIDA)\b/i)?.[1] || null;
+            const nivel = context.match(/\b(\d+)\b/)?.[1] || null;
+            
+            // Try to extract schedule (HH:MM format)
+            const horarioMatch = context.match(/(\d{1,2}:\d{2}\s*-\s*\d{1,2}:\d{2})/);
+            const horario = horarioMatch ? horarioMatch[1] : null;
+
+            subjects.push({
+                sigla: sigla.trim().toUpperCase(),
+                grupo: grupo.trim().toUpperCase(),
+                materia: materiaClean,
+                modalidad,
+                nivel,
+                horario
+            });
+            
+            logger.debug('Subject extracted (plain)', { sigla, grupo, materia: materiaClean });
+        }
     }
 
     logger.info('Subjects extraction completed', { count: subjects.length });

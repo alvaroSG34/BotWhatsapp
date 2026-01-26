@@ -25,42 +25,79 @@ if (process.env.OPENAI_API_KEY && process.env.OPENAI_API_KEY !== 'your_openai_ap
  */
 async function performOCRSpace(buffer, mimeType) {
     try {
-        logger.info('Using OCR.space API for OCR');
+        logger.info('Using OCR.space API for OCR', { 
+            bufferSize: buffer.length,
+            mimeType: mimeType
+        });
         
         if (!process.env.OCR_SPACE_API_KEY) {
             throw new Error('OCR_SPACE_API_KEY not configured');
         }
         
-        // Convert buffer to base64
-        const base64Image = buffer.toString('base64');
-        const dataUrl = `data:${mimeType};base64,${base64Image}`;
+        // Convert buffer to base64 (use original buffer, not preprocessed)
+        const base64String = buffer.toString('base64');
+        const dataUrl = `data:${mimeType};base64,${base64String}`;
+        
+        logger.info('OCR.space request details', {
+            base64Length: base64String.length,
+            base64Preview: base64String.substring(0, 50) + '...',
+            bufferSize: buffer.length,
+            apiKeyConfigured: !!process.env.OCR_SPACE_API_KEY,
+            mimeType: mimeType
+        });
+        
+        // Use FormData instead of JSON (required by OCR.space for base64)
+        const FormData = (await import('formdata-node')).FormData;
+        const formData = new FormData();
+        formData.append('base64Image', dataUrl); // Full data URL with prefix
+        formData.append('apikey', process.env.OCR_SPACE_API_KEY);
+        formData.append('filetype', 'JPG'); // REQUIRED: file type parameter
+        formData.append('OCREngine', '3');
+        
+        logger.info('OCR.space FormData prepared', {
+            hasDataUrl: dataUrl.startsWith('data:'),
+            dataUrlPrefix: dataUrl.substring(0, 30),
+            filetype: 'JPG',
+            ocrEngine: '3'
+        });
         
         // Call OCR.space API
         const response = await fetch('https://api.ocr.space/parse/image', {
             method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'apikey': process.env.OCR_SPACE_API_KEY
-            },
-            body: JSON.stringify({
-                base64Image: dataUrl,
-                language: 'spa',
-                isOverlayRequired: false,
-                detectOrientation: true,
-                scale: true,
-                OCREngine: 2 // Engine 2 better for structured documents/tables
-            })
+            body: formData
+        });
+        
+        logger.info('OCR.space response received', {
+            status: response.status,
+            statusText: response.statusText
         });
         
         const data = await response.json();
         
+        // Log complete response for debugging
+        logger.info('OCR.space full response', {
+            response: JSON.stringify(data).substring(0, 500)
+        });
+        
         if (data.IsErroredOnProcessing) {
+            // Log full error details
+            logger.error('OCR.space processing failed', {
+                errorMessage: data.ErrorMessage,
+                errorDetails: data.ErrorDetails,
+                ocrExitCode: data.OCRExitCode,
+                processingTimeInMS: data.ProcessingTimeInMilliseconds
+            });
             throw new Error(data.ErrorMessage?.[0] || 'OCR.space processing error');
         }
         
         const extractedText = data.ParsedResults?.[0]?.ParsedText;
         
         if (!extractedText) {
+            logger.error('OCR.space returned no text', {
+                parsedResults: data.ParsedResults,
+                hasResults: !!data.ParsedResults,
+                resultsLength: data.ParsedResults?.length
+            });
             throw new Error('No text extracted from OCR.space');
         }
         
@@ -90,6 +127,7 @@ export async function preprocessImage(imageBuffer) {
             .greyscale() // Convert to grayscale
             .normalize() // Enhance contrast
             .sharpen({ sigma: 1 }) // Sharpen text
+            .jpeg({ quality: 90 }) // Ensure output is valid JPEG
             .toBuffer();
     } catch (error) {
         logger.error('Error preprocessing image', { error: error.message });
