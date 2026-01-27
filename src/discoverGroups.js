@@ -14,7 +14,9 @@ async function discoverGroups() {
     logger.info('Starting group discovery script');
     
     const client = new Client({
-        authStrategy: new LocalAuth(),
+        authStrategy: new LocalAuth({
+            dataPath: './auth_info' // Misma sesión que index.js
+        }),
         puppeteer: {
             headless: true,
             args: ['--no-sandbox', '--disable-setuid-sandbox']
