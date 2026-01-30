@@ -118,7 +118,7 @@ export function extractSubjects(text) {
 
     // Pattern 1: Table with pipes (Markdown-style table from OCR.space)
     // Example: | INF412 | SA | SISTEMAS DE INFORMACION II | PRESENCIAL | 7 | Ma 07:00-09:15 |
-    const tablePattern = /\|\s*([A-Z]{3,4}\d{3,4})\s*\|\s*(\d?[A-Z]{1,2})\s*\|\s*([A-ZÑÁÉÍÓÚÜ\s.0-9]{5,}?)\s*\|/gi;
+    const tablePattern = /\|\s*([A-Z]{3,4}\d{3,4})\s*\|\s*(\d?[A-Z]{1,2})\s*\|\s*([A-ZÑÁÉÍÓÚÜY\s.0-9]{5,}?)\s*\|/gi;
     
     let match;
     while ((match = tablePattern.exec(normalized)) !== null) {
@@ -144,7 +144,7 @@ export function extractSubjects(text) {
     if (subjects.length === 0) {
         // Only normalize spaces for plain text parsing
         const textForPlain = normalized.replace(/\s+/g, ' ');
-        const pattern = /\b([A-Z]{3,4}\d{3,4})\s+(\d?[A-Z]{1,2})\s+([A-ZÑÁÉÍÓÚÜ\s.]{5,})(?=\s+(?:PRESENCIAL|VIRTUAL|HIBRIDA|\d+|Ma|Lu|Mi|Ju|Vi|Sa|Do)|\s*$)/gi;
+        const pattern = /\b([A-Z]{3,4}\d{3,4})\s+(\d?[A-Z]{1,2})\s+([A-ZÑÁÉÍÓÚÜY\s.]{5,})(?=\s+(?:PRESENCIAL|VIRTUAL|HIBRIDA|\d+|Ma|Lu|Mi|Ju|Vi|Sa|Do)|\s*$)/gi;
         
         while ((match = pattern.exec(textForPlain)) !== null) {
             const [fullMatch, sigla, grupo, materia] = match;
