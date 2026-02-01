@@ -2,10 +2,11 @@ import pkg from 'whatsapp-web.js';
 const { Client, LocalAuth } = pkg;
 import qrcode from 'qrcode-terminal';
 import { logger } from './logger.js';
+import { getOrCreateGrupoMateria, getActiveSemester } from './database.js';
 
 /**
- * Discover WhatsApp groups and suggest SIGLA+GRUPO mappings
- * Run this script to automatically detect groups and generate SQL INSERT commands
+ * Discover WhatsApp groups and automatically seed them into grupo_materia
+ * Run this script to automatically detect groups and create database entries
  * 
  * Usage: npm run discover-groups
  */
@@ -51,8 +52,13 @@ async function discoverGroups() {
             console.log(`\n📋 GRUPOS ENCONTRADOS (${grupos.length}):\n`);
             console.log('='.repeat(80));
             
-            const sqlCommands = [];
+            const insertedGroups = [];
+            const failedGroups = [];
             let foundCount = 0;
+            
+            // Get active semester
+            const semestreId = await getActiveSemester();
+            logger.info('Using active semester', { semestreId });
             
             for (const grupo of grupos) {
                 const name = grupo.name;
@@ -84,14 +90,29 @@ async function discoverGroups() {
                     console.log(`   📌 GRUPO: ${grupoCode}`);
                     console.log(`   📌 JID: ${jid}`);
                     
-                    const sqlCommand = `INSERT INTO subject_group_mapping (sigla, grupo, materia_name, whatsapp_group_jid) VALUES ('${sigla}', '${grupoCode}', '${name.replace(/'/g, "''")}', '${jid}') ON CONFLICT (sigla, grupo) DO NOTHING;`;
-                    sqlCommands.push(sqlCommand);
+                    try {
+                        // Insert into database using getOrCreateGrupoMateria
+                        const grupoMateria = await getOrCreateGrupoMateria(
+                            sigla,
+                            grupoCode,
+                            name,
+                            jid // Provide JID to auto-create
+                        );
+                        
+                        console.log(`   ✅ Guardado en base de datos (ID: ${grupoMateria.id})`);
+                        insertedGroups.push({ sigla, grupoCode, name, jid });
+                        
+                    } catch (error) {
+                        console.log(`   ❌ Error al guardar: ${error.message}`);
+                        failedGroups.push({ sigla, grupoCode, name, jid, error: error.message });
+                    }
                     
                 } else {
                     console.log(`\n⚠️  Grupo: ${name}`);
                     console.log(`   ❌ No se pudo detectar SIGLA/GRUPO automáticamente`);
                     console.log(`   📌 JID: ${jid}`);
                     console.log(`   💡 Mapeo manual requerido`);
+                    failedGroups.push({ name, jid, error: 'No pattern match' });
                 }
             }
             
@@ -99,13 +120,20 @@ async function discoverGroups() {
             console.log(`\n📊 RESUMEN:`);
             console.log(`   Total de grupos: ${grupos.length}`);
             console.log(`   Auto-detectados: ${foundCount}`);
-            console.log(`   Requieren mapeo manual: ${grupos.length - foundCount}`);
+            console.log(`   Guardados exitosamente: ${insertedGroups.length}`);
+            console.log(`   Requieren mapeo manual: ${failedGroups.length}`);
             
-            if (sqlCommands.length > 0) {
-                console.log(`\n\n💾 COMANDOS SQL PARA COPIAR Y EJECUTAR:\n`);
+            if (failedGroups.length > 0) {
+                console.log(`\n\n⚠️  GRUPOS QUE REQUIEREN MAPEO MANUAL:\n`);
                 console.log('='.repeat(80));
-                console.log('\n-- Ejecuta estos comandos en tu base de datos PostgreSQL:\n');
-                sqlCommands.forEach(cmd => console.log(cmd));
+                failedGroups.forEach((g, i) => {
+                    console.log(`\n${i + 1}. ${g.name || 'N/A'}`);
+                    console.log(`   JID: ${g.jid}`);
+                    if (g.sigla && g.grupoCode) {
+                        console.log(`   SIGLA: ${g.sigla}, GRUPO: ${g.grupoCode}`);
+                    }
+                    console.log(`   Error: ${g.error}`);
+                });
                 console.log('\n' + '='.repeat(80));
             }
             

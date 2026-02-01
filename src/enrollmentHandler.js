@@ -9,8 +9,8 @@ import {
     getPendingDocument,
     getSubjectsForDocument,
     markSubjectAdded,
-    getStudentSubjectCount,
-    incrementStudentSubjectCount
+    markSubjectFailed,
+    getStudentSubjectCount
 } from './database.js';
 import { mapSubjectsToGroups } from './groupMapper.js';
 import { randomDelay, enviarMensajeHumano, delayFromRange } from './antibanHelpers.js';
@@ -46,8 +46,8 @@ export async function handleDocumentUpload(client, message, media) {
             await enviarMensajeHumano(
                 chat,
                 `⚠️ *Documento duplicado*\n\n` +
-                `Ya procesaste este documento el ${new Date(duplicate.created_at).toLocaleDateString()}.\n` +
-                `Estado: ${duplicate.status}`
+                `Ya procesaste este documento el ${new Date(duplicate.creado_en).toLocaleDateString()}.\n` +
+                `Estado: ${duplicate.estado}`
             );
             return;
         }
@@ -105,16 +105,17 @@ export async function handleDocumentUpload(client, message, media) {
         
         const documentId = await insertDocument(
             student.id,
-            parsed.registrationNumber,
             docHash,
             ocrText,
             parsed,
             message.id._serialized
         );
         
-        // Insert subjects
+        // Insert subjects (create boleta_grupo entries)
         for (const subject of mappedSubjects) {
-            await insertSubject(documentId, subject, subject.groupJid);
+            if (subject.grupoMateriaId) {
+                await insertSubject(documentId, subject.grupoMateriaId);
+            }
         }
         
         // Step 7: Show confirmation message
@@ -162,7 +163,7 @@ export async function handleDocumentUpload(client, message, media) {
         });
         
         // Check if it's a duplicate registration number error
-        if (error.message && error.message.includes('students_registration_number_key')) {
+        if (error.message && error.message.includes('estudiantes_numero_registro_key')) {
             const registrationNumber = parsed?.registrationNumber || 'desconocido';
             await enviarMensajeHumano(
                 chat,
@@ -209,12 +210,12 @@ export async function handleConfirmation(client, message, remitente, agregarAGru
         }
         
         // Check expiration (10 minutes)
-        const createdAt = new Date(pendingDoc.created_at);
+        const createdAt = new Date(pendingDoc.creado_en);
         const now = new Date();
         const minutesElapsed = (now - createdAt) / (1000 * 60);
         
         if (minutesElapsed > 10) {
-            await updateDocumentStatus(pendingDoc.id, 'expired');
+            await updateDocumentStatus(pendingDoc.id, 'expirado');
             await enviarMensajeHumano(
                 chat,
                 `⏱️ *Tiempo expirado*\n\n` +
@@ -225,20 +226,20 @@ export async function handleConfirmation(client, message, remitente, agregarAGru
         }
         
         // Update status
-        await updateDocumentStatus(pendingDoc.id, 'confirmed');
-        await updateDocumentStatus(pendingDoc.id, 'processing');
+        await updateDocumentStatus(pendingDoc.id, 'confirmado');
+        await updateDocumentStatus(pendingDoc.id, 'procesando');
         
         await enviarMensajeHumano(chat, `🔄 Procesando tu inscripción...\n\nEsto puede tomar unos minutos.`);
         
         // Get subjects to add
         const subjects = await getSubjectsForDocument(pendingDoc.id);
-        const toAdd = subjects.filter(s => s.group_jid);
+        const toAdd = subjects.filter(s => s.jid_grupo && s.estado_agregado === 'pendiente');
         
         if (toAdd.length === 0) {
-            await updateDocumentStatus(pendingDoc.id, 'failed');
+            await updateDocumentStatus(pendingDoc.id, 'fallido');
             await enviarMensajeHumano(
                 chat,
-                `❌ No hay materias con grupos configurados para agregar.`
+                `❌ No hay materias pendientes para agregar.`
             );
             return;
         }
@@ -255,7 +256,7 @@ export async function handleConfirmation(client, message, remitente, agregarAGru
             try {
                 const result = await agregarAGrupo(
                     client,
-                    subject.group_jid,
+                    subject.jid_grupo,
                     remitente,
                     materiaNombre
                 );
@@ -271,16 +272,19 @@ export async function handleConfirmation(client, message, remitente, agregarAGru
                         userId: remitente
                     });
                 } else {
+                    await markSubjectFailed(subject.id, result.mensaje || 'Error desconocido');
                     results.failed.push(subject);
                     
                     logger.warn('Subject addition failed', {
                         subjectId: subject.id,
                         sigla: subject.sigla,
                         grupo: subject.grupo,
-                        userId: remitente
+                        userId: remitente,
+                        error: result.mensaje
                     });
                 }
             } catch (error) {
+                await markSubjectFailed(subject.id, error.message);
                 results.failed.push(subject);
                 
                 logger.error('Error adding subject', {
@@ -292,13 +296,12 @@ export async function handleConfirmation(client, message, remitente, agregarAGru
             }
         }
         
-        // Increment counter only for successfully added subjects
-        if (results.success.length > 0) {
-            await incrementStudentSubjectCount(remitente, results.success.length);
-        }
+        // NOTE: No need to call incrementStudentSubjectCount()
+        // The trigger actualizar_total_materias_estudiante() handles it automatically
+        // when estado_agregado changes to 'agregado'
         
         // Update final status
-        await updateDocumentStatus(pendingDoc.id, 'completed');
+        await updateDocumentStatus(pendingDoc.id, 'completado');
         
         // Send results
         let resultMsg = `*Inscripción completada!*\n\n`;

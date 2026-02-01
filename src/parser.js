@@ -108,17 +108,22 @@ export function extractSubjects(text) {
     // Log original text for debugging
     logger.info('Extracting subjects from text', {
         textLength: text.length,
-        textPreview: text.substring(0, 300)
+        textPreview: text.substring(0, 500),
+        fullText: text // Log complete text for debugging missing subjects
     });
     
     // Normalize text: fix common OCR errors (but preserve newlines for table parsing)
+    // IMPORTANT: Be careful not to break valid siglas like ECO449
     const normalized = text
-        .replace(/[Oo](?=\d)/g, '0')  // O -> 0 before digits
-        .replace(/[Il](?=\d)/g, '1'); // I/l -> 1 before digits
+        // Only replace O->0 when O is surrounded by digits (not in letter sequences)
+        .replace(/(?<=\d)[Oo](?=\d)/g, '0')  // 2O5 -> 205 (O between digits)
+        .replace(/[Il](?=\d)/g, '1')         // I/l -> 1 before digits
+        .replace(/\bSA\b/gi, '5A');           // SA -> 5A (common OCR error in groups)
 
     // Pattern 1: Table with pipes (Markdown-style table from OCR.space)
     // Example: | INF412 | SA | SISTEMAS DE INFORMACION II | PRESENCIAL | 7 | Ma 07:00-09:15 |
-    const tablePattern = /\|\s*([A-Z]{3,4}\d{3,4})\s*\|\s*(\d?[A-Z]{1,2})\s*\|\s*([A-ZÑÁÉÍÓÚÜ\s.0-9]{5,}?)\s*\|/gi;
+    // Now captures ANY 3-4 letter prefix (INF, ECO, MAT, etc.) + 3-4 digits
+    const tablePattern = /\|\s*([A-Z]{3,4}\d{3,4})\s*\|\s*(\d?[A-Z]{1,2})\s*\|\s*([A-ZÑÁÉÍÓÚÜ\s.0-9&]{5,}?)\s*\|/gi;
     
     let match;
     while ((match = tablePattern.exec(normalized)) !== null) {
@@ -136,15 +141,21 @@ export function extractSubjects(text) {
             horario: null
         });
         
-        logger.info('Subject extracted (table)', { sigla, grupo, materia: materiaClean });
+        logger.info('Subject extracted (table)', { 
+            sigla: sigla.trim().toUpperCase(), 
+            grupo: grupo.trim().toUpperCase(), 
+            materia: materiaClean,
+            matchedPattern: 'table-pipe'
+        });
     }
     
     // Pattern 2: Plain text format (fallback for Tesseract)
-    // Examples: INF412 5A SISTEMAS OPERATIVOS, INF412 SA SISTEMAS OPERATIVOS
+    // Examples: INF412 5A SISTEMAS OPERATIVOS, ECO449 5A PREPARAC Y EVALUAC
+    // Support any prefix (INF, ECO, MAT, etc.)
     if (subjects.length === 0) {
         // Only normalize spaces for plain text parsing
         const textForPlain = normalized.replace(/\s+/g, ' ');
-        const pattern = /\b([A-Z]{3,4}\d{3,4})\s+(\d?[A-Z]{1,2})\s+([A-ZÑÁÉÍÓÚÜ\s.]{5,})(?=\s+(?:PRESENCIAL|VIRTUAL|HIBRIDA|\d+|Ma|Lu|Mi|Ju|Vi|Sa|Do)|\s*$)/gi;
+        const pattern = /\b([A-Z]{3,4}\d{3,4})\s+(\d?[A-Z]{1,2})\s+([A-ZÑÁÉÍÓÚÜ\s.&]{5,})(?=\s+(?:PRESENCIAL|VIRTUAL|HIBRIDA|\d+|Ma|Lu|Mi|Ju|Vi|Sa|Do)|\s*$)/gi;
         
         while ((match = pattern.exec(textForPlain)) !== null) {
             const [fullMatch, sigla, grupo, materia] = match;
@@ -170,8 +181,58 @@ export function extractSubjects(text) {
                 horario
             });
             
-            logger.debug('Subject extracted (plain)', { sigla, grupo, materia: materiaClean });
+            logger.info('Subject extracted (plain)', { 
+                sigla: sigla.trim().toUpperCase(), 
+                grupo: grupo.trim().toUpperCase(), 
+                materia: materiaClean,
+                matchedPattern: 'plain-text'
+            });
         }
+    }
+    
+    // Pattern 3: Even more relaxed pattern for OCR errors
+    // Catches subjects that might have been missed due to spacing/formatting
+    if (subjects.length === 0) {
+        logger.warn('No subjects found with standard patterns, trying relaxed pattern');
+        // Match: 3-4 letters, 3-4 digits, optional spaces, 1-2 chars for group
+        const relaxedPattern = /\b([A-Z]{3,4})\s*(\d{3,4})\s+(\d?[A-Z]{1,2})\b/gi;
+        
+        while ((match = relaxedPattern.exec(normalized)) !== null) {
+            const [fullMatch, prefix, number, grupo] = match;
+            const sigla = `${prefix}${number}`;
+            
+            // Try to find materia name in the next 50 chars
+            const afterMatch = normalized.substring(match.index + fullMatch.length, match.index + fullMatch.length + 80);
+            const materiaMatch = afterMatch.match(/\s+([A-ZÑÁÉÍÓÚÜ\s.&]{10,}?)(?=\s+(?:PRESENCIAL|VIRTUAL|Ma|Lu|Mi|Ju|Vi|\||$))/);
+            const materia = materiaMatch ? materiaMatch[1].trim() : 'MATERIA DESCONOCIDA';
+            
+            subjects.push({
+                sigla: sigla.toUpperCase(),
+                grupo: grupo.toUpperCase(),
+                materia: materia.replace(/\s+/g, ' '),
+                modalidad: null,
+                nivel: null,
+                horario: null
+            });
+            
+            logger.info('Subject extracted (relaxed)', { 
+                sigla: sigla.toUpperCase(), 
+                grupo: grupo.toUpperCase(), 
+                materia,
+                matchedPattern: 'relaxed'
+            });
+        }
+    }
+
+    // Log all unique SIGLA patterns found in the text for debugging
+    const allSiglaMatches = normalized.match(/\b([A-Z]{3,4}\d{3,4})\b/gi);
+    if (allSiglaMatches) {
+        const uniqueSiglas = [...new Set(allSiglaMatches.map(s => s.toUpperCase()))];
+        logger.info('All SIGLA codes found in OCR text', { 
+            siglas: uniqueSiglas,
+            extractedCount: subjects.length,
+            missingSiglas: uniqueSiglas.filter(s => !subjects.some(sub => sub.sigla === s))
+        });
     }
 
     logger.info('Subjects extraction completed', { count: subjects.length });

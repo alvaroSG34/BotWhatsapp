@@ -26,9 +26,9 @@ async function deleteStudentEnrollments(registrationNumber) {
         
         // Find student
         const studentQuery = `
-            SELECT id, registration_number, student_name, whatsapp_id, total_subjects_enrolled
-            FROM students
-            WHERE registration_number = $1
+            SELECT id, numero_registro, nombre_estudiante, id_whatsapp, total_materias_registradas
+            FROM estudiantes
+            WHERE numero_registro = $1
         `;
         
         const studentResult = await pool.query(studentQuery, [registrationNumber]);
@@ -41,15 +41,15 @@ async function deleteStudentEnrollments(registrationNumber) {
         
         const student = studentResult.rows[0];
         console.log(`✅ Estudiante encontrado:`);
-        console.log(`   Nombre: ${student.student_name}`);
-        console.log(`   WhatsApp: ${student.whatsapp_id}`);
-        console.log(`   Materias inscritas: ${student.total_subjects_enrolled}\n`);
+        console.log(`   Nombre: ${student.nombre_estudiante}`);
+        console.log(`   WhatsApp: ${student.id_whatsapp}`);
+        console.log(`   Materias inscritas: ${student.total_materias_registradas}\n`);
         
         // Find documents
         const documentsQuery = `
-            SELECT id, status, created_at
-            FROM enrollment_documents
-            WHERE student_id = $1
+            SELECT id, estado, fecha_subida as creado_en
+            FROM boletas_inscripciones
+            WHERE id_estudiante = $1
         `;
         
         const documentsResult = await pool.query(documentsQuery, [student.id]);
@@ -63,7 +63,7 @@ async function deleteStudentEnrollments(registrationNumber) {
         
         // Show documents
         documentsResult.rows.forEach((doc, index) => {
-            console.log(`   ${index + 1}. Documento ID ${doc.id} - Status: ${doc.status} - Creado: ${doc.created_at}`);
+            console.log(`   ${index + 1}. Documento ID ${doc.id} - Status: ${doc.estado} - Creado: ${doc.creado_en}`);
         });
         
         console.log(`\n⚠️  ¿CONFIRMAS LA ELIMINACIÓN?\n`);
@@ -77,35 +77,35 @@ async function deleteStudentEnrollments(registrationNumber) {
         
         console.log(`🗑️  Eliminando datos...\n`);
         
-        // Delete enrollment_subjects (cascade will handle this, but explicit is better)
+        // Delete boleta_grupo (cascade will handle this, but explicit is better)
         const deleteSubjectsQuery = `
-            DELETE FROM enrollment_subjects
-            WHERE document_id IN (
-                SELECT id FROM enrollment_documents WHERE student_id = $1
+            DELETE FROM boleta_grupo
+            WHERE id_boleta IN (
+                SELECT id FROM boletas_inscripciones WHERE id_estudiante = $1
             )
         `;
         const subjectsResult = await pool.query(deleteSubjectsQuery, [student.id]);
         console.log(`✅ Materias eliminadas: ${subjectsResult.rowCount}`);
         
-        // Delete enrollment_documents
+        // Delete boletas_inscripciones
         const deleteDocsQuery = `
-            DELETE FROM enrollment_documents
-            WHERE student_id = $1
+            DELETE FROM boletas_inscripciones
+            WHERE id_estudiante = $1
         `;
         const docsResult = await pool.query(deleteDocsQuery, [student.id]);
         console.log(`✅ Documentos eliminados: ${docsResult.rowCount}`);
         
         // Reset student counter
         const resetCounterQuery = `
-            UPDATE students
-            SET total_subjects_enrolled = 0
+            UPDATE estudiantes
+            SET total_materias_registradas = 0
             WHERE id = $1
         `;
         await pool.query(resetCounterQuery, [student.id]);
         console.log(`✅ Contador de materias reseteado a 0`);
         
         console.log(`\n🎉 ¡Proceso completado!`);
-        console.log(`\n💡 El estudiante "${student.student_name}" puede subir una nueva boleta.`);
+        console.log(`\n💡 El estudiante "${student.nombre_estudiante}" puede subir una nueva boleta.`);
         
     } catch (error) {
         console.error(`\n❌ Error fatal:`, error.message);
