@@ -313,16 +313,16 @@ const iniciarBot = async () => {
     // Event: Mensaje recibido
     client.on('message', async (message) => {
         await manejarMensaje(client, message);
-    });async (reason) => {
+    });
+    
+    // Event: Desconexión
+    client.on('disconnected', async (reason) => {
         logger.error('WhatsApp client disconnected', { reason });
         console.log('❌ Cliente desconectado:', reason);
         
         // Detener integración con panel
         await stopPanelIntegration(client);
         
-    client.on('disconnected', (reason) => {
-        logger.error('WhatsApp client disconnected', { reason });
-        console.log('❌ Cliente desconectado:', reason);
         console.log('🔄 Reiniciando...\n');
         iniciarBot();
     });
