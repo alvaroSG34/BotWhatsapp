@@ -117,8 +117,8 @@ export function extractSubjects(text) {
     const normalized = text
         // Only replace O->0 when O is surrounded by digits (not in letter sequences)
         .replace(/(?<=\d)[Oo](?=\d)/g, '0')  // 2O5 -> 205 (O between digits)
-        .replace(/[Il](?=\d)/g, '1')         // I/l -> 1 before digits
-        .replace(/\bSA\b/gi, '5A');           // SA -> 5A (common OCR error in groups)
+        .replace(/[Il](?=\d)/g, '1');        // I/l -> 1 before digits
+        // NOTE: Removed SA->5A conversion - SA is the correct group code, not 5A
 
     // Pattern 1: Table with pipes (Markdown-style table from OCR.space)
     // Example: | INF412 | SA | SISTEMAS DE INFORMACION II | PRESENCIAL | 7 | Ma 07:00-09:15 |

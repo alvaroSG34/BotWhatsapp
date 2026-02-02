@@ -8,7 +8,8 @@
     "start": "node src/index.js",
     "dev": "node --watch src/index.js",
     "discover-groups": "node src/discoverGroups.js",
-    "delete-student": "node delete-student-enrollments.js"
+    "delete-student": "node delete-student-enrollments.js",
+    "test-panel": "node test-panel-integration.js"
   },
   "keywords": [
     "whatsapp",

@@ -7,6 +7,7 @@ import { handleDocumentUpload, handleConfirmation } from './enrollmentHandler.js
 import { randomDelay, enviarMensajeHumano, delayFromRange } from './antibanHelpers.js';
 import { startExpirationCleaner } from './cleanupTasks.js';
 import { normalizeForComparison } from './parser.js';
+import { startPanelIntegration, stopPanelIntegration } from './panelIntegration.js';
 
 /**
  * Normaliza texto para comparación (backward compatibility)
@@ -304,14 +305,21 @@ const iniciarBot = async () => {
         }
         
         console.log('🎯 ¡Todo listo! Los usuarios pueden enviar su boleta de inscripción.\n');
+        
+        // Iniciar integración con panel de administración
+        await startPanelIntegration(client);
     });
     
     // Event: Mensaje recibido
     client.on('message', async (message) => {
         await manejarMensaje(client, message);
-    });
-    
-    // Event: Desconexión
+    });async (reason) => {
+        logger.error('WhatsApp client disconnected', { reason });
+        console.log('❌ Cliente desconectado:', reason);
+        
+        // Detener integración con panel
+        await stopPanelIntegration(client);
+        
     client.on('disconnected', (reason) => {
         logger.error('WhatsApp client disconnected', { reason });
         console.log('❌ Cliente desconectado:', reason);
