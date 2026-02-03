@@ -6,6 +6,9 @@ Bot de WhatsApp que automatiza la inscripción de estudiantes a grupos mediante 
 
 - ✅ **Procesamiento OCR automático** de boletas de inscripción (PDF e imágenes)
 - ✅ **Extracción inteligente** de número de registro, nombre del estudiante, y materias con grupos
+- ✅ **Validación de registro consistente** - Evita fraude detectando boletas de otras personas
+- ✅ **Detección de nuevas materias** - Solo procesa materias nuevas, salta duplicados
+- ✅ **Sistema de colas** - Maneja 50+ usuarios simultáneos sin rate limits
 - ✅ **Validación con el usuario** antes de procesar la inscripción
 - ✅ **Límite de 8 materias por estudiante** (acumulativo permanente)
 - ✅ **Protocolo anti-baneo** con delays aleatorios y simulación de escritura
@@ -248,6 +251,43 @@ El bot:
 
 - Si una materia no tiene grupo configurado, se marca con ⚠️
 - Solo se procesan materias con ✅ (grupo configurado)
+
+## 🛠️ Scripts de Administración
+
+### Eliminar boletas de un estudiante
+
+Para eliminar boletas de un estudiante específico (por ejemplo, para testing o corrección de errores):
+
+```bash
+npm run delete-boleta <numero_registro>
+# o
+node delete-student-boleta.js <numero_registro>
+```
+
+**Ejemplo:**
+```bash
+npm run delete-boleta 222009752
+```
+
+El script mostrará:
+1. Datos del estudiante
+2. Lista de todas sus boletas con detalles
+3. Materias de cada boleta
+4. Opciones de eliminación:
+   - `[1]` Eliminar TODAS las boletas (mantener estudiante)
+   - `[2]` Eliminar TODO (estudiante + boletas) - como si nunca hubiera usado el bot
+   - `[3]` Eliminar boleta específica por ID
+   - `[0]` Cancelar
+
+**Nota:** Las eliminaciones son permanentes. El script actualiza automáticamente el contador de `total_materias_registradas`.
+
+### Descubrir grupos de WhatsApp
+
+```bash
+npm run discover-groups
+```
+
+Este script escanea todos los grupos de WhatsApp y genera comandos SQL para insertarlos en la base de datos.
 - Las materias sin grupo NO cuentan para el límite de 8
 
 ## 🛡️ Protocolo Anti-Baneo
@@ -393,12 +433,55 @@ BotWhatsapp/
 │   ├── index.js                # Punto de entrada del bot
 │   ├── logger.js               # Configuración de Winston
 │   ├── ocr.js                  # Procesamiento OCR
+│   ├── panelIntegration.js     # ⭐ Integración con panel admin
 │   └── parser.js               # Extracción de datos de OCR
 ├── .env                        # Variables de entorno (crear)
 ├── .env.example                # Template de variables
+├── CONFIGURACION_PANEL.md      # ⭐ Guía de integración con panel
+├── test-panel-integration.js   # Script de prueba de integración
 ├── package.json
 └── README.md
 ```
+
+## 🖥️ Integración con Panel de Administración
+
+El bot incluye integración completa con un panel web de administración. Ver [CONFIGURACION_PANEL.md](CONFIGURACION_PANEL.md) para instrucciones detalladas.
+
+### Características del panel:
+
+- ✅ **Monitoreo en tiempo real** del estado del bot
+- ✅ **Heartbeat automático** cada 60 segundos
+- ✅ **Caché de grupos** de WhatsApp actualizada
+- ✅ **Comandos remotos** (reintentar inscripción, actualizar grupos, reiniciar bot)
+- ✅ **Visualización de inscripciones** y estudiantes
+- ✅ **Logs centralizados**
+
+### Configuración rápida:
+
+1. Crear usuario bot en el panel:
+   ```bash
+   cd ../Panel_Bot
+   node create-bot-user.js
+   ```
+
+2. Agregar variables al `.env` del bot:
+   ```env
+   PANEL_URL=http://localhost:4000/api
+   PANEL_BOT_USER=bot-service
+   PANEL_BOT_PASSWORD=BotWhatsapp2025
+   ```
+
+3. Probar la conexión:
+   ```bash
+   npm run test-panel
+   ```
+
+4. Iniciar el bot normalmente:
+   ```bash
+   npm start
+   ```
+
+Ver el estado del bot en el panel web: `http://localhost:3000/bot-monitor`
 
 ## ⚠️ Advertencias Importantes
 

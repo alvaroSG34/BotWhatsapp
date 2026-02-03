@@ -16,11 +16,22 @@ export const COMANDOS = {
  * Formato: [minMs, maxMs]
  */
 export const DELAYS = {
-    RESPUESTA_INICIAL: [2000, 5000],    // 2-5 segundos antes de responder
-    ENTRE_MENSAJES: [5000, 15000],      // 5-15 segundos entre mensajes
-    ENTRE_ADICIONES: [8000, 20000],     // 8-20 segundos entre agregar a grupos
-    DESPUES_ERROR: [10000, 15000]       // 10-15 segundos después de un error
+    RESPUESTA_INICIAL: [1000, 2500],    // 1-2.5 segundos antes de responder
+    ENTRE_MENSAJES: [2500, 8000],       // 2.5-8 segundos entre mensajes
+    ENTRE_ADICIONES: [7000, 14000],     // 7-14 segundos entre agregar a grupos
+    DESPUES_ERROR: [5000, 8000]         // 5-8 segundos después de un error
 };
+
+/**
+ * Configuración del sistema de colas
+ */
+export const QUEUE_CHECK_INTERVAL = 500;           // 500ms entre checks de cola
+export const SHUTDOWN_TIMEOUT = 600000;            // 10 minutos para graceful shutdown
+export const LOG_EVERY_N_JOBS = 10;                // Logger cada N trabajos procesados
+export const MAX_RETRIES = 2;                      // Reintentos máximos por trabajo
+export const WORKER_RESTART_DELAYS = [5000, 10000, 20000, 40000, 60000]; // Backoff exponencial
+export const DOCUMENT_FAIL_THRESHOLD = 3;          // Materias fallidas para marcar documento fallido
+export const NOTIFICATION_DELAYS = [2000, 5000];   // 2-5 segundos entre notificaciones
 
 /**
  * Mensajes del bot

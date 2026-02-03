@@ -16,7 +16,7 @@ const pool = new Pool({
     ssl: {
         rejectUnauthorized: false // Required for Neon and other cloud PostgreSQL providers
     },
-    max: 20, // Maximum number of clients in the pool
+    max: 50, // Maximum number of clients in the pool
     idleTimeoutMillis: 30000,
     connectionTimeoutMillis: 20000, // 20 seconds for cloud databases
 });
@@ -363,7 +363,7 @@ export async function getPendingDocument(whatsappId) {
         SELECT ed.id, ed.datos_parseados, ed.estado, ed.fecha_subida as creado_en
         FROM boletas_inscripciones ed
         JOIN estudiantes s ON ed.id_estudiante = s.id
-        WHERE s.id_whatsapp = $1 AND ed.estado = 'pendiente'
+        WHERE s.id_whatsapp = $1 AND ed.estado IN ('pendiente', 'procesando')
         ORDER BY ed.fecha_subida DESC
         LIMIT 1
     `;

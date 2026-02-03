@@ -8,6 +8,8 @@ import { randomDelay, enviarMensajeHumano, delayFromRange } from './antibanHelpe
 import { startExpirationCleaner } from './cleanupTasks.js';
 import { normalizeForComparison } from './parser.js';
 import { startPanelIntegration, stopPanelIntegration } from './panelIntegration.js';
+import { startJobWorker, startNotificationWorker, stopWorkers } from './queueWorker.js';
+import { queueManager, addNotification } from './queueManager.js';
 
 /**
  * Normaliza texto para comparación (backward compatibility)
@@ -33,9 +35,6 @@ const agregarAGrupo = async (client, grupoJid, usuarioNumero, materiaNombre) => 
         const resultado = await grupoChat.addParticipants([usuarioNumero]);
         
         logger.debug('addParticipants result', { resultado });
-        
-        // Random delay entre adiciones (anti-ban)
-        await delayFromRange(DELAYS.ENTRE_ADICIONES);
         
         // Verificar si realmente fue agregado
         if (resultado && resultado[usuarioNumero]) {
@@ -258,6 +257,79 @@ const iniciarBot = async () => {
         startExpirationCleaner();
         logger.info('Expiration cleaner started');
         
+        // Iniciar integración con panel de administración
+        await startPanelIntegration(client);
+        logger.info('Panel integration started');
+
+        // Iniciar workers de cola
+        startJobWorker(client, agregarAGrupo).catch(err => {
+            logger.error('Job worker fatal error', { error: err.message });
+        });
+        
+        startNotificationWorker(client).catch(err => {
+            logger.error('Notification worker fatal error', { error: err.message });
+        });
+        
+        logger.info('Queue workers started');
+        console.log('🔄 Sistema de colas iniciado\n');
+
+        // Listener para documentos completados
+        queueManager.on('document:ready-to-notify', async ({ documentId, results, userId }) => {
+            try {
+                const chat = await client.getChatById(userId);
+                
+                const success = results.filter(r => r.success);
+                const failed = results.filter(r => !r.success);
+                
+                let message = `✅ *Proceso completado*\n\n`;
+                message += `✅ Agregadas: ${success.length}\n`;
+                
+                if (failed.length > 0) {
+                    message += `❌ Fallidas: ${failed.length}\n\n`;
+                    message += `*Materias no agregadas:*\n`;
+                    failed.forEach(f => {
+                        message += `  • ${f.materiaNombre}\n`;
+                    });
+                }
+                
+                addNotification({ userId, message, chat });
+                
+                logger.info('Document completion notification queued', { 
+                    documentId, 
+                    userId, 
+                    successCount: success.length, 
+                    failedCount: failed.length 
+                });
+            } catch (error) {
+                logger.warn('Failed to get chat for notification', { 
+                    userId, 
+                    documentId, 
+                    error: error.message 
+                });
+            }
+        });
+
+        // Listener para documentos fallidos
+        queueManager.on('document:failed', async ({ documentId, results, userId }) => {
+            try {
+                const chat = await client.getChatById(userId);
+                
+                const message = `❌ *Inscripción fallida*\n\n` +
+                    `No se pudieron agregar 3 o más materias.\n` +
+                    `Por favor, intenta nuevamente más tarde.`;
+                
+                addNotification({ userId, message, chat });
+                
+                logger.warn('Document failed notification queued', { documentId, userId });
+            } catch (error) {
+                logger.warn('Failed to get chat for failure notification', { 
+                    userId, 
+                    documentId, 
+                    error: error.message 
+                });
+            }
+        });
+        
         // Parchear sendSeen para evitar el bug de markedUnread
         try {
             await client.pupPage.evaluate(() => {
@@ -320,6 +392,11 @@ const iniciarBot = async () => {
         logger.error('WhatsApp client disconnected', { reason });
         console.log('❌ Cliente desconectado:', reason);
         
+        // Detener workers antes de reiniciar
+        await stopWorkers().catch(err => {
+            logger.error('Error stopping workers', { error: err.message });
+        });
+        
         // Detener integración con panel
         await stopPanelIntegration(client);
         
@@ -343,6 +420,23 @@ const iniciarBot = async () => {
     console.log('⚙️ Inicializando cliente...\n');
     await client.initialize();
 };
+
+// Graceful shutdown handler
+process.on('SIGINT', async () => {
+    logger.info('SIGINT received, shutting down gracefully...');
+    console.log('\n🛑 Deteniendo bot...\n');
+    
+    try {
+        await stopWorkers();
+        logger.info('Workers stopped, destroying client...');
+        console.log('✅ Workers detenidos\n');
+        process.exit(0);
+    } catch (error) {
+        logger.error('Shutdown timeout exceeded', { error: error.message });
+        console.error('❌ Timeout al detener workers\n');
+        process.exit(1);
+    }
+});
 
 // Manejo de errores no capturados
 process.on('uncaughtException', (error) => {

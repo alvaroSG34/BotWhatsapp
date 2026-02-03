@@ -1,5 +1,6 @@
 import { logger } from './logger.js';
 import { enviarMensajeHumano } from './antibanHelpers.js';
+import { getQueueStats } from './queueManager.js';
 import os from 'os';
 
 /**
@@ -92,6 +93,7 @@ async function sendHeartbeat(client, status = 'CONNECTED') {
             estado_whatsapp: status,
             version_bot: process.env.npm_package_version || '1.0.0',
             grupos_cache: gruposCache,
+            queueStats: getQueueStats()
         };
 
         logger.debug('Sending heartbeat to panel', { 

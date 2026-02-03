@@ -9,6 +9,7 @@
     "dev": "node --watch src/index.js",
     "discover-groups": "node src/discoverGroups.js",
     "delete-student": "node delete-student-enrollments.js",
+    "delete-boleta": "node delete-student-boleta.js",
     "test-panel": "node test-panel-integration.js"
   },
   "keywords": [
@@ -19,6 +20,7 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "axios": "^1.13.4",
     "dotenv": "^17.2.3",
     "formdata-node": "^6.0.3",
     "openai": "^6.16.0",

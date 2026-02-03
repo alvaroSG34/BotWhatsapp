@@ -16,6 +16,12 @@ import { mapSubjectsToGroups } from './groupMapper.js';
 import { randomDelay, enviarMensajeHumano, delayFromRange } from './antibanHelpers.js';
 import { logger } from './logger.js';
 import { MAX_SUBJECTS_PER_USER, DELAYS } from './config.js';
+import { addJob, initDocument } from './queueManager.js';
+import { 
+    validateRegistrationNumberConsistency,
+    getStudentAddedSubjects,
+    compareSubjects
+} from './validationHelpers.js';
 
 /**
  * Handle document upload (boleta)
@@ -37,7 +43,7 @@ export async function handleDocumentUpload(client, message, media) {
         // Initial delay (anti-ban protocol)
         await randomDelay(DELAYS.RESPUESTA_INICIAL[0], DELAYS.RESPUESTA_INICIAL[1]);
         
-        // Step 1: Calculate hash for duplicate detection
+        // Step 1: Calculate hash for duplicate detection (same file)
         const buffer = Buffer.from(media.data, 'base64');
         const docHash = calculateDocumentHash(buffer);
         
@@ -46,8 +52,22 @@ export async function handleDocumentUpload(client, message, media) {
             await enviarMensajeHumano(
                 chat,
                 `⚠️ *Documento duplicado*\n\n` +
-                `Ya procesaste este documento el ${new Date(duplicate.creado_en).toLocaleDateString()}.\n` +
+                `Ya procesaste este archivo el ${new Date(duplicate.creado_en).toLocaleDateString()}.\n` +
                 `Estado: ${duplicate.estado}`
+            );
+            return;
+        }
+        
+        // Step 1b: Check for pending documents from this student (different photo of same boleta)
+        const pendingDoc = await getPendingDocument(remitente);
+        if (pendingDoc) {
+            const timeSinceUpload = (Date.now() - new Date(pendingDoc.creado_en).getTime()) / 60000; // minutes
+            await enviarMensajeHumano(
+                chat,
+                `⚠️ *Ya tienes un documento en proceso*\n\n` +
+                `Subiste una boleta hace ${Math.round(timeSinceUpload)} minutos.\n` +
+                `Estado: ${pendingDoc.estado}\n\n` +
+                `${pendingDoc.estado === 'pendiente' ? 'Por favor confirma con *LISTO* para continuar.' : 'Espera a que termine de procesarse.'}`
             );
             return;
         }
@@ -73,9 +93,33 @@ export async function handleDocumentUpload(client, message, media) {
             return;
         }
         
+        // Step 3b: Validate registration number consistency
+        const registrationCheck = await validateRegistrationNumberConsistency(remitente, parsed.registrationNumber);
+        
+        if (!registrationCheck.isValid && registrationCheck.existingRegistration) {
+            await enviarMensajeHumano(
+                chat,
+                `⚠️ *Número de registro no coincide*\n\n` +
+                `Esta cuenta de WhatsApp está vinculada al registro: *${registrationCheck.existingRegistration}*\n\n` +
+                `La boleta que enviaste tiene el registro: *${parsed.registrationNumber}*\n\n` +
+                `❌ No puedes inscribir materias de otra persona.\n\n` +
+                `Si cambiaste de número de registro, contacta al administrador.`
+            );
+            logger.warn('Registration number mismatch - enrollment blocked', {
+                whatsappId: remitente,
+                existingRegistration: registrationCheck.existingRegistration,
+                attemptedRegistration: parsed.registrationNumber
+            });
+            return;
+        }
+        
         // Step 4: Validate subject limit
         const currentCount = await getStudentSubjectCount(remitente);
-        const newSubjectsCount = parsed.subjects.length;
+        
+        // Get already added subjects early for validation
+        const addedSubjects = await getStudentAddedSubjects(remitente);
+        const comparison = compareSubjects(parsed.subjects, addedSubjects);
+        const newSubjectsCount = comparison.newSubjects.length;
         const totalAfterAdd = currentCount + newSubjectsCount;
         
         if (totalAfterAdd > MAX_SUBJECTS_PER_USER) {
@@ -96,6 +140,43 @@ export async function handleDocumentUpload(client, message, media) {
         const mappedSubjects = await mapSubjectsToGroups(parsed.subjects);
         const unmappedCount = mappedSubjects.filter(s => !s.canAdd).length;
         
+        // Step 5b: Re-filter with mapped subjects (some may not have groups)
+        const mappedComparison = compareSubjects(
+            mappedSubjects.filter(s => s.canAdd),
+            addedSubjects
+        );
+        
+        // Si todas las materias ya están agregadas
+        if (mappedComparison.newSubjects.length === 0 && mappedComparison.duplicateSubjects.length > 0) {
+            let duplicateMsg = `ℹ️ *Boleta ya procesada*\n\n` +
+                `Ya estás inscrito en todas las materias de esta boleta:\n\n`;
+            
+            for (const s of mappedComparison.duplicateSubjects) {
+                duplicateMsg += `✅ ${s.sigla} - Grupo ${s.grupo}\n`;
+            }
+            
+            duplicateMsg += `\n💡 Si tienes nuevas materias, envía tu boleta actualizada.`;
+            
+            await enviarMensajeHumano(chat, duplicateMsg);
+            
+            logger.info('All subjects already added - skipping', {
+                whatsappId: remitente,
+                duplicateCount: mappedComparison.duplicateSubjects.length
+            });
+            return;
+        }
+        
+        // Actualizar mappedSubjects para solo incluir las nuevas
+        const finalSubjects = mappedSubjects.map(s => {
+            const isDuplicate = mappedComparison.duplicateSubjects.some(
+                d => d.sigla === s.sigla && d.grupo === s.grupo
+            );
+            return {
+                ...s,
+                isAlreadyAdded: isDuplicate
+            };
+        });
+        
         // Step 6: Save to database
         const student = await upsertStudent(
             parsed.registrationNumber,
@@ -111,40 +192,62 @@ export async function handleDocumentUpload(client, message, media) {
             message.id._serialized
         );
         
-        // Insert subjects (create boleta_grupo entries)
-        for (const subject of mappedSubjects) {
-            if (subject.grupoMateriaId) {
+        // Insert subjects (create boleta_grupo entries - only new ones)
+        for (const subject of finalSubjects) {
+            if (subject.grupoMateriaId && !subject.isAlreadyAdded) {
                 await insertSubject(documentId, subject.grupoMateriaId);
             }
         }
         
         // Step 7: Show confirmation message
+        const newCount = mappedComparison.newSubjects.length;
+        const duplicateCount = mappedComparison.duplicateSubjects.length;
+        
         let confirmMsg = 
             `✅ *Documento procesado*\n\n` +
             `*Estudiante:* ${parsed.studentName}\n` +
             `*Registro:* ${parsed.registrationNumber}\n` +
-            `*Materias actuales:* ${currentCount}/${MAX_SUBJECTS_PER_USER}\n` +
-            `*Nuevas materias:* ${newSubjectsCount}\n\n` +
-            `*Materias detectadas:*\n`;
+            `*Materias actuales:* ${currentCount}/${MAX_SUBJECTS_PER_USER}\n`;
         
-        for (const s of mappedSubjects) {
-            const icon = s.canAdd ? '✅' : '⚠️';
+        if (newCount > 0) {
+            confirmMsg += `*Nuevas materias:* ${newCount}\n`;
+        }
+        
+        if (duplicateCount > 0) {
+            confirmMsg += `*Ya inscritas:* ${duplicateCount}\n`;
+        }
+        
+        confirmMsg += `\n*Materias detectadas:*\n`;
+        
+        for (const s of finalSubjects) {
+            let icon;
+            if (s.isAlreadyAdded) {
+                icon = '✓'; // Ya agregada (no se procesará)
+            } else if (s.canAdd) {
+                icon = '✅'; // Nueva (se procesará)
+            } else {
+                icon = '⚠️'; // Sin grupo configurado
+            }
             confirmMsg += `${icon} ${s.sigla} - Grupo ${s.grupo}\n    _${s.materia}_\n`;
         }
         
         if (unmappedCount > 0) {
             confirmMsg += 
-                `\n⚠️ *${unmappedCount} materia(s) no tienen grupo de WhatsApp configurado.*\n` +
-                `Solo se procesarán las materias marcadas con ✅\n`;
+                `\n⚠️ *${unmappedCount} materia(s) no tienen grupo de WhatsApp configurado.*\n`;
         }
         
-        const validSubjectsCount = mappedSubjects.filter(s => s.canAdd).length;
+        if (duplicateCount > 0) {
+            confirmMsg += 
+                `\nℹ️ Las materias marcadas con ✓ ya fueron procesadas anteriormente.\n`;
+        }
+        
+        const validSubjectsCount = newCount;
         if (validSubjectsCount > 0) {
             confirmMsg += 
-                `\n💬 Responde *"LISTO"* para confirmar e inscribirte automáticamente a ${validSubjectsCount} grupo(s).`;
+                `\n💬 Responde *"LISTO"* para confirmar e inscribirte automáticamente a ${validSubjectsCount} grupo(s) nuevo(s).`;
         } else {
             confirmMsg += 
-                `\n❌ No hay materias con grupos configurados. Contacta al administrador.`;
+                `\n❌ No hay materias nuevas para procesar.`;
         }
         
         await enviarMensajeHumano(chat, confirmMsg);
@@ -229,8 +332,6 @@ export async function handleConfirmation(client, message, remitente, agregarAGru
         await updateDocumentStatus(pendingDoc.id, 'confirmado');
         await updateDocumentStatus(pendingDoc.id, 'procesando');
         
-        await enviarMensajeHumano(chat, `🔄 Procesando tu inscripción...\n\nEsto puede tomar unos minutos.`);
-        
         // Get subjects to add
         const subjects = await getSubjectsForDocument(pendingDoc.id);
         const toAdd = subjects.filter(s => s.jid_grupo && s.estado_agregado === 'pendiente');
@@ -243,94 +344,28 @@ export async function handleConfirmation(client, message, remitente, agregarAGru
             );
             return;
         }
-        
-        const results = { success: [], failed: [] };
-        
-        // Add to groups one by one with delays
+
+        // Inicializar progreso del documento en queue manager
+        initDocument(pendingDoc.id, toAdd.length);
+
+        // Agregar trabajos a la cola (no esperar procesamiento)
         for (const subject of toAdd) {
-            // Random delay between additions (anti-ban)
-            await delayFromRange(DELAYS.ENTRE_ADICIONES);
-            
-            const materiaNombre = `${subject.sigla} - Grupo ${subject.grupo}`;
-            
-            try {
-                const result = await agregarAGrupo(
-                    client,
-                    subject.jid_grupo,
-                    remitente,
-                    materiaNombre
-                );
-                
-                if (result.exito) {
-                    await markSubjectAdded(subject.id);
-                    results.success.push(subject);
-                    
-                    logger.info('Subject added successfully', {
-                        subjectId: subject.id,
-                        sigla: subject.sigla,
-                        grupo: subject.grupo,
-                        userId: remitente
-                    });
-                } else {
-                    await markSubjectFailed(subject.id, result.mensaje || 'Error desconocido');
-                    results.failed.push(subject);
-                    
-                    logger.warn('Subject addition failed', {
-                        subjectId: subject.id,
-                        sigla: subject.sigla,
-                        grupo: subject.grupo,
-                        userId: remitente,
-                        error: result.mensaje
-                    });
-                }
-            } catch (error) {
-                await markSubjectFailed(subject.id, error.message);
-                results.failed.push(subject);
-                
-                logger.error('Error adding subject', {
-                    error: error.message,
-                    subjectId: subject.id,
-                    sigla: subject.sigla,
-                    userId: remitente
-                });
-            }
+            addJob({
+                userId: remitente,
+                groupJid: subject.jid_grupo,
+                subjectId: subject.id,
+                documentId: pendingDoc.id,
+                materiaNombre: `${subject.sigla} - Grupo ${subject.grupo}`
+            });
         }
+
+        // No enviar mensaje inmediato - el usuario recibirá la notificación cuando termine
+        // (El sistema de colas enviará "Proceso completado" o "Procesando..." según corresponda)
         
-        // NOTE: No need to call incrementStudentSubjectCount()
-        // The trigger actualizar_total_materias_estudiante() handles it automatically
-        // when estado_agregado changes to 'agregado'
-        
-        // Update final status
-        await updateDocumentStatus(pendingDoc.id, 'completado');
-        
-        // Send results
-        let resultMsg = `*Inscripción completada!*\n\n`;
-        
-        if (results.success.length > 0) {
-            resultMsg += `*✓ Agregado exitosamente (${results.success.length}):*\n`;
-            for (const s of results.success) {
-                resultMsg += `  • ${s.sigla} - Grupo ${s.grupo}\n`;
-            }
-        }
-        
-        if (results.failed.length > 0) {
-            resultMsg += `\n*✗ No se pudo agregar (${results.failed.length}):*\n`;
-            for (const s of results.failed) {
-                resultMsg += `  • ${s.sigla} - Grupo ${s.grupo}\n`;
-            }
-            resultMsg += `\n_Intenta nuevamente más tarde si es necesario._`;
-        }
-        
-        const newTotal = await getStudentSubjectCount(remitente);
-        resultMsg += `\n\n📊 *Total de materias inscritas:* ${newTotal}/${MAX_SUBJECTS_PER_USER}`;
-        
-        await enviarMensajeHumano(chat, resultMsg);
-        
-        logger.info('Enrollment confirmation completed', {
+        logger.info('Enrollment confirmation completed, jobs queued', {
             documentId: pendingDoc.id,
             userId: remitente,
-            successCount: results.success.length,
-            failedCount: results.failed.length
+            jobsQueued: toAdd.length
         });
         
     } catch (error) {
