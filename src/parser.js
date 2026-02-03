@@ -61,7 +61,7 @@ export function extractRegistrationNumber(text) {
  * @returns {string|null}
  */
 export function extractStudentName(text) {
-    // Look for pattern: digits followed by name (all caps), before career keywords
+    // Pattern 1: digits followed by name (all caps), before career keywords
     const pattern = /\d{8,9}\s+([A-ZÑÁÉÍÓÚ\s]{10,})(?:\s+(?:CARRERA|INGENIERIA|INGENIERÍA|ING\.|LICENCIATURA))/i;
     const match = text.match(pattern);
     
@@ -71,13 +71,37 @@ export function extractStudentName(text) {
         return name;
     }
 
+    // Pattern 2: Name in table row AFTER registration (Markdown table format)
+    // Example: | 248112233 |\n| Vargas Cruz Camila 5192837-SCZ |
+    const tableNamePattern = /\|\s*\d{8,9}\s*\|[\s\n]*\|\s*([A-ZÑÁÉÍÓÚa-zñáéíóú\s]+?)\s+\d{5,}-[A-Z]{2,4}\s*\|/;
+    const tableMatch = text.match(tableNamePattern);
+    if (tableMatch) {
+        const name = tableMatch[1].trim();
+        logger.debug('Student name found in table format', { name });
+        return name;
+    }
+
+    // Pattern 3: Name with CI in same line (mixed case)
+    // Example: "Vargas Cruz Camila 5192837-SCZ"
+    const nameWithCiPattern = /([A-ZÑÁÉÍÓÚa-zñáéíóú]{3,}(?:\s+[A-ZÑÁÉÍÓÚa-zñáéíóú]{3,}){1,4})\s+\d{5,}-[A-Z]{2,4}/;
+    const nameWithCi = text.match(nameWithCiPattern);
+    if (nameWithCi) {
+        const name = nameWithCi[1].trim();
+        // Skip if it looks like a header or period name
+        if (!name.match(/PERIODO|NORMAL|MODALIDAD|LOCALIDAD|ORIGEN|INGENIERIA|INFORMATICA/i)) {
+            logger.debug('Student name found with CI pattern', { name });
+            return name;
+        }
+    }
+
     // Fallback: look for line after registration number
     const lines = text.split('\n');
     for (let i = 0; i < lines.length - 1; i++) {
         if (/\d{8,9}/.test(lines[i])) {
             const nextLine = lines[i + 1].trim();
-            // Check if next line looks like a name (mostly uppercase letters)
-            if (/^[A-ZÑÁÉÍÓÚ\s]{10,}$/.test(nextLine)) {
+            // Check if next line looks like a name (uppercase or mixed case letters)
+            if (/^[A-ZÑÁÉÍÓÚa-zñáéíóú\s]{10,}$/.test(nextLine) && 
+                !nextLine.match(/PERIODO|NORMAL|MODALIDAD|LOCALIDAD|ORIGEN/i)) {
                 logger.debug('Student name found on next line', { name: nextLine });
                 return nextLine;
             }
@@ -87,7 +111,7 @@ export function extractStudentName(text) {
     // Last resort: look for line with "SONCO GUZMAN" pattern (two or more capitalized words)
     const namePattern = /\b([A-ZÑÁÉÍÓÚ]{3,}\s+[A-ZÑÁÉÍÓÚ]{3,}(?:\s+[A-ZÑÁÉÍÓÚ]{3,})?)\b/;
     const nameMatch = text.match(namePattern);
-    if (nameMatch) {
+    if (nameMatch && !nameMatch[1].match(/PERIODO|NORMAL|MODALIDAD|LOCALIDAD|ORIGEN/i)) {
         logger.debug('Student name found with name pattern', { name: nameMatch[1] });
         return nameMatch[1];
     }
@@ -122,8 +146,9 @@ export function extractSubjects(text) {
 
     // Pattern 1: Table with pipes (Markdown-style table from OCR.space)
     // Example: | INF412 | SA | SISTEMAS DE INFORMACION II | PRESENCIAL | 7 | Ma 07:00-09:15 |
-    // Now captures ANY 3-4 letter prefix (INF, ECO, MAT, etc.) + 3-4 digits
-    const tablePattern = /\|\s*([A-Z]{3,4}\d{3,4})\s*\|\s*(\d?[A-Z]{1,2})\s*\|\s*([A-ZÑÁÉÍÓÚÜ\s.0-9&]{5,}?)\s*\|/gi;
+    // SIGLA: exactly 3 letters + 3 digits (INF513, RSD421)
+    // GRUPO: letter + (letter or digit), never digit+digit (Z1, SA, SB)
+    const tablePattern = /\|\s*([A-Z]{3}\d{3})\s*\|\s*([A-Z][A-Z0-9])\s*\|\s*([A-ZÑÁÉÍÓÚÜ\s.0-9&]{5,}?)\s*\|/gi;
     
     let match;
     while ((match = tablePattern.exec(normalized)) !== null) {
@@ -155,7 +180,8 @@ export function extractSubjects(text) {
     if (subjects.length === 0) {
         // Only normalize spaces for plain text parsing
         const textForPlain = normalized.replace(/\s+/g, ' ');
-        const pattern = /\b([A-Z]{3,4}\d{3,4})\s+(\d?[A-Z]{1,2})\s+([A-ZÑÁÉÍÓÚÜ\s.&]{5,})(?=\s+(?:PRESENCIAL|VIRTUAL|HIBRIDA|\d+|Ma|Lu|Mi|Ju|Vi|Sa|Do)|\s*$)/gi;
+        // SIGLA: 3 letters + 3 digits, GRUPO: letter + (letter or digit)
+        const pattern = /\b([A-Z]{3}\d{3})\s+([A-Z][A-Z0-9])\s+([A-ZÑÁÉÍÓÚÜ\s.&]{5,})(?=\s+(?:PRESENCIAL|VIRTUAL|HIBRIDA|\d+|Ma|Lu|Mi|Ju|Vi|Sa|Do)|\s*$)/gi;
         
         while ((match = pattern.exec(textForPlain)) !== null) {
             const [fullMatch, sigla, grupo, materia] = match;
@@ -195,7 +221,8 @@ export function extractSubjects(text) {
     if (subjects.length === 0) {
         logger.warn('No subjects found with standard patterns, trying relaxed pattern');
         // Match: 3-4 letters, 3-4 digits, optional spaces, 1-2 chars for group
-        const relaxedPattern = /\b([A-Z]{3,4})\s*(\d{3,4})\s+(\d?[A-Z]{1,2})\b/gi;
+        // SIGLA: 3 letters + 3 digits (with optional space), GRUPO: letter + (letter or digit)
+        const relaxedPattern = /\b([A-Z]{3})\s*(\d{3})\s+([A-Z][A-Z0-9])\b/gi;
         
         while ((match = relaxedPattern.exec(normalized)) !== null) {
             const [fullMatch, prefix, number, grupo] = match;
