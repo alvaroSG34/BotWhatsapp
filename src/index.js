@@ -12,6 +12,18 @@ import { startJobWorker, startNotificationWorker, stopWorkers } from './queueWor
 import { queueManager, addNotification } from './queueManager.js';
 
 /**
+ * Timestamp de inicio del bot (para ignorar mensajes históricos)
+ * Se establece cuando el cliente está listo
+ */
+let botStartTimestamp = null;
+
+/**
+ * Margen de tolerancia en segundos para mensajes recibidos durante el inicio
+ * Permite procesar mensajes enviados hasta 30 segundos antes de que el bot esté listo
+ */
+const MESSAGE_TOLERANCE_SECONDS = 30;
+
+/**
  * Normaliza texto para comparación (backward compatibility)
  */
 const normalizar = (texto) => normalizeForComparison(texto);
@@ -121,6 +133,24 @@ const manejarMensaje = async (client, message) => {
         if (chat.isGroup || message.fromMe) return;
         
         const remitente = message.from; // ID del usuario
+        
+        // FILTRO DE MENSAJES HISTÓRICOS: Ignorar mensajes anteriores al inicio del bot
+        // Esto evita procesar mensajes sincronizados cuando el bot se conecta en un nuevo servidor
+        if (botStartTimestamp) {
+            const messageTimestamp = message.timestamp * 1000; // WhatsApp usa segundos, convertir a ms
+            const toleranceMs = MESSAGE_TOLERANCE_SECONDS * 1000;
+            const cutoffTimestamp = botStartTimestamp - toleranceMs;
+            
+            if (messageTimestamp < cutoffTimestamp) {
+                logger.debug('Ignoring historical message', {
+                    from: remitente,
+                    messageTime: new Date(messageTimestamp).toISOString(),
+                    botStartTime: new Date(botStartTimestamp).toISOString(),
+                    ageSeconds: Math.round((botStartTimestamp - messageTimestamp) / 1000)
+                });
+                return;
+            }
+        }
         
         logger.info('Message received', {
             from: remitente,
@@ -249,9 +279,16 @@ const iniciarBot = async () => {
     
     // Event: Cliente listo
     client.on('ready', async () => {
-        logger.info('WhatsApp client ready');
+        // Establecer timestamp de inicio ANTES de cualquier otra cosa
+        // Esto es crítico para filtrar mensajes históricos sincronizados
+        botStartTimestamp = Date.now();
+        logger.info('WhatsApp client ready', { 
+            botStartTimestamp: new Date(botStartTimestamp).toISOString(),
+            toleranceSeconds: MESSAGE_TOLERANCE_SECONDS
+        });
         console.log('\n✅ Bot listo para recibir documentos!\n');
         console.log('📸 Los usuarios deben enviar su boleta de inscripción (foto o PDF).\n');
+        console.log(`⏱️  Ignorando mensajes anteriores a: ${new Date(botStartTimestamp - MESSAGE_TOLERANCE_SECONDS * 1000).toLocaleTimeString()}\n`);
         
         // Start cleanup task for expired documents
         startExpirationCleaner();
