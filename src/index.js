@@ -10,6 +10,7 @@ import { normalizeForComparison } from './parser.js';
 import { startPanelIntegration, stopPanelIntegration } from './panelIntegration.js';
 import { startJobWorker, startNotificationWorker, stopWorkers } from './queueWorker.js';
 import { queueManager, addNotification } from './queueManager.js';
+import startAdminApi from './adminApi.js';
 
 /**
  * Timestamp de inicio del bot (para ignorar mensajes históricos)
@@ -239,7 +240,7 @@ const iniciarBot = async () => {
     // Crear cliente con autenticación local
     const client = new Client({
         authStrategy: new LocalAuth({
-            dataPath: './auth_info'
+            dataPath: process.env.BOT_USER_DATA_DIR || './auth_info'
         }),
         webVersionCache: {
             type: 'none'
@@ -306,6 +307,14 @@ const iniciarBot = async () => {
         startNotificationWorker(client).catch(err => {
             logger.error('Notification worker fatal error', { error: err.message });
         });
+
+            // Iniciar API administrativa para crear grupos
+            try {
+                startAdminApi(client);
+                logger.info('Admin API started');
+            } catch (apiErr) {
+                logger.error('Failed to start Admin API', { error: apiErr.message });
+            }
         
         logger.info('Queue workers started');
         console.log('🔄 Sistema de colas iniciado\n');
@@ -315,20 +324,13 @@ const iniciarBot = async () => {
             try {
                 const chat = await client.getChatById(userId);
                 
-                const success = results.filter(r => r.success);
-                const failed = results.filter(r => !r.success);
-                
-                let message = `✅ *Proceso completado*\n\n`;
-                message += `✅ Agregadas: ${success.length}\n`;
-                
-                if (failed.length > 0) {
-                    message += `❌ Fallidas: ${failed.length}\n\n`;
-                    message += `*Materias no agregadas:*\n`;
-                    failed.forEach(f => {
-                        message += `  • ${f.materiaNombre}\n`;
-                    });
-                }
-                
+                const success = results.filter(r => r.success).length;
+                const failed = results.filter(r => !r.success).length;
+
+                // Send concise summary as requested
+                let message = `Correctos{${success}}`;
+                if (failed > 0) message += `, Errores{${failed}}`;
+
                 addNotification({ userId, message, chat });
                 
                 logger.info('Document completion notification queued', { 
@@ -350,11 +352,11 @@ const iniciarBot = async () => {
         queueManager.on('document:failed', async ({ documentId, results, userId }) => {
             try {
                 const chat = await client.getChatById(userId);
-                
-                const message = `❌ *Inscripción fallida*\n\n` +
-                    `No se pudieron agregar 3 o más materias.\n` +
-                    `Por favor, intenta nuevamente más tarde.`;
-                
+                const success = results.filter(r => r.success).length;
+                const failed = results.filter(r => !r.success).length;
+                let message = `Correctos{${success}}`;
+                if (failed > 0) message += `, Errores{${failed}}`;
+
                 addNotification({ userId, message, chat });
                 
                 logger.warn('Document failed notification queued', { documentId, userId });

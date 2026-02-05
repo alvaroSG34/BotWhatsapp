@@ -8,6 +8,7 @@ import {
     NOTIFICATION_DELAYS
 } from './config.js';
 import { queueManager, getNextJob, getNextNotification, trackJobCompletion } from './queueManager.js';
+import { enviarMensajeHumano } from './antibanHelpers.js';
 import { logger } from './logger.js';
 import pool from './database.js';
 import { delayFromRange } from './antibanHelpers.js';
@@ -38,7 +39,41 @@ async function jobWorkerLoop(client, agregarAGrupo) {
 
             queueManager.markJobProcessing();
             
-            const { userId, groupJid, subjectId, documentId, materiaNombre } = job;
+            const { userId, groupJid, subjectId, documentId, materiaNombre, type, groupName } = job;
+
+            // Handle admin-created group job: create group and add the user
+            if (type === 'create_group') {
+                logger.info('Processing create_group job', { groupName, userId, documentId });
+
+                let result = { exito: false, materia: groupName };
+
+                try {
+                    // Create group with the given user as initial participant
+                    const created = await client.createGroup(groupName, [userId]);
+                    logger.info('Group created', { groupName, created });
+                    result.exito = true;
+                } catch (err) {
+                    logger.error('Failed create_group job', { error: err.message, groupName, userId });
+                    result.exito = false;
+                }
+
+                // Track completion in the document/batch so a single summary is sent later
+                try {
+                    trackJobCompletion(documentId, {
+                        success: result.exito,
+                        message: result.materia,
+                        materiaNombre: groupName,
+                        userId
+                    });
+                } catch (trackErr) {
+                    logger.error('Failed to track create_group completion', { error: trackErr.message, documentId });
+                }
+
+                // Respect anti-ban delay after creating/adding
+                await delayFromRange(DELAYS.ENTRE_ADICIONES);
+                queueManager.markJobCompleted();
+                continue;
+            }
             
             logger.debug('Processing job', { 
                 documentId, 
@@ -76,30 +111,32 @@ async function jobWorkerLoop(client, agregarAGrupo) {
                 attempts++;
             }
 
-            // Actualizar estado en base de datos
-            try {
-                const estado = result.exito ? 'agregado' : 'fallido';
-                const query = `
-                    UPDATE boleta_grupo 
-                    SET estado_agregado = $1, 
-                        intentos = $2, 
-                        error_ultimo = $3,
-                        agregado_en = $4
-                    WHERE id = $5
-                `;
-                
-                await pool.query(query, [
-                    estado,
-                    attempts,
-                    result.exito ? null : result.materia,
-                    result.exito ? new Date() : null,
-                    subjectId
-                ]);
-            } catch (dbError) {
-                logger.error('Failed to update job status in DB', { 
-                    subjectId, 
-                    error: dbError.message 
-                });
+            // Actualizar estado en base de datos si el job está relacionado a un subjectId
+            if (subjectId) {
+                try {
+                    const estado = result.exito ? 'agregado' : 'fallido';
+                    const query = `
+                        UPDATE boleta_grupo 
+                        SET estado_agregado = $1, 
+                            intentos = $2, 
+                            error_ultimo = $3,
+                            agregado_en = $4
+                        WHERE id = $5
+                    `;
+                    
+                    await pool.query(query, [
+                        estado,
+                        attempts,
+                        result.exito ? null : result.materia,
+                        result.exito ? new Date() : null,
+                        subjectId
+                    ]);
+                } catch (dbError) {
+                    logger.error('Failed to update job status in DB', { 
+                        subjectId, 
+                        error: dbError.message 
+                    });
+                }
             }
 
             // Rastrear completado
