@@ -1,6 +1,13 @@
 import http from 'http';
 import { logger } from './logger.js';
 import { queueManager, initDocument } from './queueManager.js';
+import crypto from 'crypto';
+import {
+    upsertStudent,
+    insertDocument,
+    getOrCreateGrupoMateria,
+    insertSubject
+} from './database.js';
 
 const DEFAULT_PORT = process.env.BOT_ADMIN_PORT || 3001;
 const ADMIN_TOKEN = process.env.BOT_ADMIN_TOKEN || '';
@@ -67,17 +74,56 @@ export function startAdminApi(client) {
                 const batchId = `admin_create_${Date.now()}_${Math.floor(Math.random() * 10000)}`;
                 initDocument(batchId, cantidad);
 
-                for (let i = 0; i < cantidad; i++) {
-                    const name = `AutoGrupo_${randomSuffix(6)}`;
-                    const job = {
-                        type: 'create_group',
-                        groupName: name,
-                        userId: userJid,
-                        documentId: batchId,
-                        materiaNombre: name
-                    };
-                    queueManager.addJob(job);
-                    queued.push({ groupName: name });
+                // Persist a document and subject lines using existing schema helpers
+                try {
+                    // Upsert a student record using phone as fallback registration
+                    const regNum = String(nro);
+                    const studentName = `Admin create ${new Date().toISOString()}`;
+                    const student = await upsertStudent(regNum, studentName, userJid);
+
+                    // Create a document record for this admin batch
+                    const documentHash = crypto.createHash('sha256')
+                        .update(batchId + String(Date.now()) + Math.random())
+                        .digest('hex');
+
+                    const documentId = await insertDocument(
+                        student.id,
+                        documentHash,
+                        null,
+                        { admin_create: true, batchId },
+                        null
+                    );
+
+                    for (let i = 0; i < cantidad; i++) {
+                        const name = `AutoGrupo_${randomSuffix(6)}`;
+
+                        // Create a placeholder JID to register the oferta (will be updated later when real group is created)
+                        const placeholderJid = `admin://${batchId}/${name}`;
+
+                        // Create or get a grupo_materia entry. Use sigla=name and grupo='ADMIN'
+                        const gm = await getOrCreateGrupoMateria(name, 'ADMIN', name, placeholderJid);
+
+
+                        // Insert a boleta_grupo (subject line) pointing to the grupo_materia
+                        const boletaGrupoId = await insertSubject(documentId, gm.id);
+
+                        // Enqueue the create_group job referencing the document
+                        const job = {
+                            type: 'create_group',
+                            groupName: name,
+                            userId: userJid,
+                            documentId: batchId,
+                            subjectId: boletaGrupoId,
+                            materiaNombre: name
+                        };
+                        queueManager.addJob(job);
+                        queued.push({ groupName: name, grupo_materia_id: gm.id, boleta_grupo_id: boletaGrupoId });
+                    }
+                } catch (dbErr) {
+                    logger.error('Failed to persist admin create-groups batch', { error: dbErr.message });
+                    res.writeHead(500, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: 'Failed to persist batch' }));
+                    return;
                 }
 
                 logger.info('Admin create-groups queued', { user: userJid, count: queued.length });

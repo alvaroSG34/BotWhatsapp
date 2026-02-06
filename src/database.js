@@ -515,4 +515,56 @@ export async function expireOldDocuments(timeoutMinutes = 10) {
     }
 }
 
+/**
+ * Check if a DTIC token was already used
+ * @param {string} token
+ * @returns {Promise<boolean>}
+ */
+export async function isTokenUsed(token) {
+    const query = `
+        SELECT token, id_whatsapp, usado_en
+        FROM dtic_tokens_usados
+        WHERE token = $1
+        LIMIT 1
+    `;
+
+    try {
+        const result = await pool.query(query, [token]);
+        return result.rows.length > 0;
+    } catch (error) {
+        logger.error('Error checking token usage', { error: error.message, token });
+        throw error;
+    }
+}
+
+/**
+ * Atomically mark a DTIC token as used
+ * @param {string} token
+ * @param {number|null} remoteBoletaId
+ * @param {string|null} whatsappId
+ * @returns {Promise<boolean>} true if inserted (was free), false if already existed
+ */
+export async function markTokenUsed(token, remoteBoletaId = null, whatsappId = null) {
+    const query = `
+        INSERT INTO dtic_tokens_usados (token, remote_boleta_id, id_whatsapp)
+        VALUES ($1, $2, $3)
+        ON CONFLICT (token) DO NOTHING
+        RETURNING token
+    `;
+
+    try {
+        const result = await pool.query(query, [token, remoteBoletaId, whatsappId]);
+        const inserted = result.rows.length > 0;
+        if (inserted) {
+            logger.info('Token marked as used', { token, whatsappId, remoteBoletaId });
+        } else {
+            logger.warn('Token already used', { token, whatsappId });
+        }
+        return inserted;
+    } catch (error) {
+        logger.error('Error marking token used', { error: error.message, token });
+        throw error;
+    }
+}
+
 export default pool;

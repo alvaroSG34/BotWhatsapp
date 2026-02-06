@@ -12,6 +12,7 @@ import { enviarMensajeHumano } from './antibanHelpers.js';
 import { logger } from './logger.js';
 import pool from './database.js';
 import { delayFromRange } from './antibanHelpers.js';
+import { markSubjectAdded, markSubjectFailed } from './database.js';
 
 let isJobWorkerRunning = false;
 let isNotificationWorkerRunning = false;
@@ -67,6 +68,19 @@ async function jobWorkerLoop(client, agregarAGrupo) {
                     });
                 } catch (trackErr) {
                     logger.error('Failed to track create_group completion', { error: trackErr.message, documentId });
+                }
+
+                // If this job corresponds to a DB subject (boleta_grupo), update its status
+                if (job.subjectId) {
+                    try {
+                        if (result.exito) {
+                            await markSubjectAdded(job.subjectId);
+                        } else {
+                            await markSubjectFailed(job.subjectId, result.materia || 'create_group_failed');
+                        }
+                    } catch (dbUpdateErr) {
+                        logger.error('Failed to update boleta_grupo for create_group job', { error: dbUpdateErr.message, subjectId: job.subjectId });
+                    }
                 }
 
                 // Respect anti-ban delay after creating/adding

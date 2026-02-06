@@ -10,7 +10,9 @@ import {
     getSubjectsForDocument,
     markSubjectAdded,
     markSubjectFailed,
-    getStudentSubjectCount
+    getStudentSubjectCount,
+    isTokenUsed,
+    markTokenUsed
 } from './database.js';
 import { mapSubjectsToGroups } from './groupMapper.js';
 import { randomDelay, enviarMensajeHumano, delayFromRange } from './antibanHelpers.js';
@@ -22,6 +24,7 @@ import {
     getStudentAddedSubjects,
     compareSubjects
 } from './validationHelpers.js';
+import { fetchBoletaFromDTIC } from './dticClient.js';
 
 /**
  * Handle document upload (boleta)
@@ -382,7 +385,134 @@ export async function handleConfirmation(client, message, remitente, agregarAGru
     }
 }
 
+/**
+ * Process a boleta received from DTIC: persist student, document and subjects, and send confirmation message
+ * @param {object} remoteBoleta - object returned by DTIC
+ * @param {string} remitente - whatsapp id
+ * @param {string} token - code token
+ * @param {object} message - original WhatsApp message
+ */
+export async function processRemoteBoleta(remoteBoleta, remitente, token, message) {
+    const chat = await message.getChat();
+
+    try {
+        // Normalize remote boleta fields (support a few shapes)
+        const estudiante = remoteBoleta.estudiante || (
+            remoteBoleta.Estudiante || {
+                registro: remoteBoleta.Nro_registro || remoteBoleta.numero_registro,
+                nombre: remoteBoleta.Nombre || remoteBoleta.nombre
+            }
+        );
+
+        const registro = estudiante?.registro || estudiante?.numero_registro || remoteBoleta.Nro_registro || null;
+        const nombre = estudiante?.nombre || estudiante?.Nombre || remoteBoleta.Nombre || 'ESTUDIANTE';
+
+        // Upsert student
+        const student = await upsertStudent(registro, nombre, remitente);
+
+        // Create document record. Use token as documento_hash for traceability
+        const documentId = await insertDocument(
+            student.id,
+            token,
+            JSON.stringify(remoteBoleta),
+            remoteBoleta,
+            message.id?._serialized || message.id
+        );
+
+        // Prepare subjects list
+        let materias = remoteBoleta.Materias || remoteBoleta.materias || remoteBoleta.materias || [];
+        // If materias are objects, normalize to strings
+        materias = materias.map(m => {
+            if (typeof m === 'string') return m;
+            if (m.sigla && m.grupo) return `${m.sigla}-${m.grupo}`;
+            if (m.codigo_materia && m.codigo_grupo) return `${m.codigo_materia}-${m.codigo_grupo}`;
+            return String(m);
+        });
+
+        const subjectObjs = materias.map(item => {
+            const parts = item.split('-');
+            return { sigla: (parts[0]||'').trim(), grupo: (parts[1]||'').trim(), materia: null };
+        });
+
+        // Map to grupo_materia entries
+        const mapped = await mapSubjectsToGroups(subjectObjs);
+
+        // Insert boleta_grupo for each mapped subject
+        let inserted = 0;
+        for (const s of mapped) {
+            if (s.grupoMateriaId) {
+                await insertSubject(documentId, s.grupoMateriaId);
+                inserted++;
+            }
+        }
+
+        // Send confirmation message to user (keep confirmation flow)
+        let confirmMsg = `*Boleta obtenida correctamente*\n\n` +
+            `*Estudiante:* ${nombre}\n` +
+            `*Registro:* ${registro}\n` +
+            `*Materias detectadas:* ${inserted}\n\n` +
+            `Por favor agrega este número a tus contactos para que pueda agregarte automáticamente a los grupos.\n\n` +
+            `💬 Responde *"LISTO"* para confirmar e inscribirte automáticamente.`;
+
+        await enviarMensajeHumano(chat, confirmMsg);
+
+        logger.info('processRemoteBoleta completed', { documentId, registro, inserted });
+
+        return { documentId };
+
+    } catch (error) {
+        logger.error('Error processing remote boleta', { error: error.message, remitente, token });
+        await enviarMensajeHumano(await message.getChat(), `❌ Error procesando la boleta. Intenta nuevamente más tarde.`);
+        throw error;
+    }
+}
+
+/**
+ * Handle incoming token message: validate, reserve token atomically, fetch DTIC and persist boleta
+ * @param {string} token
+ * @param {object} client
+ * @param {object} message
+ */
+export async function handleTokenMessage(token, client, message) {
+    const chat = await message.getChat();
+    const remitente = message.from;
+
+    try {
+        await enviarMensajeHumano(chat, '🔗 Validando tu código, un momento...');
+
+        // Quick local check
+        const used = await isTokenUsed(token);
+        if (used) {
+            await enviarMensajeHumano(chat, '⚠️ Este código ya fue utilizado anteriormente. Si crees que es un error, contacta con soporte.');
+            return;
+        }
+
+        // Fetch from DTIC
+        const remoteBoleta = await fetchBoletaFromDTIC(token);
+        if (!remoteBoleta) {
+            await enviarMensajeHumano(chat, '❌ Código no válido o no encontrado en DTIC.');
+            return;
+        }
+
+        // Try to atomically reserve the token
+        const reserved = await markTokenUsed(token, remoteBoleta.id || null, remitente);
+        if (!reserved) {
+            await enviarMensajeHumano(chat, '⚠️ Este código ya fue utilizado anteriormente.');
+            return;
+        }
+
+        // Persist boleta and create subjects, then ask for confirmation
+        await processRemoteBoleta(remoteBoleta, remitente, token, message);
+
+    } catch (error) {
+        logger.error('handleTokenMessage error', { error: error.message, token });
+        await enviarMensajeHumano(chat, '❌ Ocurrió un error validando el código. Intenta nuevamente.');
+    }
+}
+
 export default {
     handleDocumentUpload,
-    handleConfirmation
+    handleConfirmation,
+    handleTokenMessage,
+    processRemoteBoleta
 };

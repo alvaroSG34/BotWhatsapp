@@ -3,7 +3,7 @@ const { Client, LocalAuth } = pkg;
 import qrcode from 'qrcode-terminal';
 import { COMANDOS, DELAYS, MENSAJES } from './config.js';
 import { logger } from './logger.js';
-import { handleDocumentUpload, handleConfirmation } from './enrollmentHandler.js';
+import { handleDocumentUpload, handleConfirmation, handleTokenMessage } from './enrollmentHandler.js';
 import { randomDelay, enviarMensajeHumano, delayFromRange } from './antibanHelpers.js';
 import { startExpirationCleaner } from './cleanupTasks.js';
 import { normalizeForComparison } from './parser.js';
@@ -196,6 +196,15 @@ const manejarMensaje = async (client, message) => {
             text: texto
         });
         
+        // Detect CODE token messages (QR scans typically send: "CODE: {token}")
+        const tokenMatch = texto.match(/CODE[:\s]*([A-Za-z0-9\-_]{16,})/i) || texto.match(/\b([0-9a-fA-F]{8}-[0-9a-fA-F\-]{20,})\b/);
+        if (tokenMatch) {
+            const token = tokenMatch[1];
+            logger.info('Token message detected', { from: remitente, tokenPreview: token.slice(0,8) });
+            await handleTokenMessage(token, client, message);
+            return;
+        }
+
         // Check if user has pending confirmation
         // Handle "LISTO" / "CONFIRMAR" for document confirmation
         if (COMANDOS.CONFIRMAR.some(cmd => textoNormalizado === cmd)) {
@@ -216,9 +225,7 @@ const manejarMensaje = async (client, message) => {
         await enviarMensajeHumano(
             chat,
             `📸 *Bienvenido al Bot de Inscripción*\n\n` +
-            `Para inscribirte, envíame una foto o PDF de tu *boleta de inscripción*.\n\n` +
-            `El bot leerá automáticamente tus datos y te agregará a los grupos.\n\n` +
-            `Escribe *menu* para más información.`
+            `Por favor entra a la plataforma y escanea el código QR de tu boleta para que la procese.\n\n`
         );
         
     } catch (error) {
@@ -323,27 +330,38 @@ const iniciarBot = async () => {
         queueManager.on('document:ready-to-notify', async ({ documentId, results, userId }) => {
             try {
                 const chat = await client.getChatById(userId);
-                
-                const success = results.filter(r => r.success).length;
-                const failed = results.filter(r => !r.success).length;
 
-                // Send concise summary as requested
-                let message = `Correctos{${success}}`;
-                if (failed > 0) message += `, Errores{${failed}}`;
+                const successes = results.filter(r => r.success);
+                const failures = results.filter(r => !r.success);
+
+                // Build a human-friendly summary message
+                let message = `✅ Inscripción procesada\n\n`;
+                message += `Materias intentadas: ${results.length}\n`;
+                message += `✅ Agregadas: ${successes.length}\n`;
+                message += `❌ Falladas: ${failures.length}\n\n`;
+
+                if (successes.length > 0) {
+                    message += `Materias añadidas:\n` + successes.map(s => `- ${s.materiaNombre}`).join('\n') + '\n\n';
+                }
+
+                if (failures.length > 0) {
+                    message += `No se pudieron agregar:\n` + failures.map(f => `- ${f.materiaNombre} — ${f.message || 'Error desconocido'}`).join('\n') + '\n\n';
+                    message += `Si necesitas ayuda, responde "AYUDA" o contacta al administrador.`;
+                }
 
                 addNotification({ userId, message, chat });
-                
-                logger.info('Document completion notification queued', { 
-                    documentId, 
-                    userId, 
-                    successCount: success.length, 
-                    failedCount: failed.length 
+
+                logger.info('Document completion notification queued', {
+                    documentId,
+                    userId,
+                    successCount: successes.length,
+                    failedCount: failures.length
                 });
             } catch (error) {
-                logger.warn('Failed to get chat for notification', { 
-                    userId, 
-                    documentId, 
-                    error: error.message 
+                logger.warn('Failed to get chat for notification', {
+                    userId,
+                    documentId,
+                    error: error.message
                 });
             }
         });
@@ -352,19 +370,31 @@ const iniciarBot = async () => {
         queueManager.on('document:failed', async ({ documentId, results, userId }) => {
             try {
                 const chat = await client.getChatById(userId);
-                const success = results.filter(r => r.success).length;
-                const failed = results.filter(r => !r.success).length;
-                let message = `Correctos{${success}}`;
-                if (failed > 0) message += `, Errores{${failed}}`;
+                const successes = results.filter(r => r.success);
+                const failures = results.filter(r => !r.success);
+
+                let message = `❌ Inscripción incompleta\n\n`;
+                message += `Se intentaron ${results.length} materia(s).\n`;
+                message += `✅ Agregadas: ${successes.length}\n`;
+                message += `❌ Falladas: ${failures.length}\n\n`;
+
+                if (successes.length > 0) {
+                    message += `Materias añadidas:\n` + successes.map(s => `- ${s.materiaNombre}`).join('\n') + '\n\n';
+                }
+
+                if (failures.length > 0) {
+                    message += `No se pudieron agregar:\n` + failures.map(f => `- ${f.materiaNombre} — ${f.message || 'Error desconocido'}`).join('\n') + '\n\n';
+                    message += `Por favor intenta de nuevo más tarde o contacta al administrador si el problema persiste.`;
+                }
 
                 addNotification({ userId, message, chat });
-                
-                logger.warn('Document failed notification queued', { documentId, userId });
+
+                logger.warn('Document failed notification queued', { documentId, userId, failedCount: failures.length });
             } catch (error) {
-                logger.warn('Failed to get chat for failure notification', { 
-                    userId, 
-                    documentId, 
-                    error: error.message 
+                logger.warn('Failed to get chat for failure notification', {
+                    userId,
+                    documentId,
+                    error: error.message
                 });
             }
         });
